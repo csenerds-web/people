@@ -1,0 +1,47 @@
+# Block direct access to dotfiles (.env, .git*, .DS_Store, etc.) — none of
+# these should ever be served, but nothing below explicitly denied them.
+# (Live on prod since the routes/web.php security pass; brought into git
+# here so it stops drifting out of the tracked file.)
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# Backups, dumps and scripts are never meant to be downloaded, wherever they
+# land under public/ (a stray db.sql or config.bak would otherwise be served
+# as-is). .json/.txt/.zip are left alone: robots.txt and the build manifest
+# are legitimately served.
+<FilesMatch "\.(sql|bak|old|orig|swp|log|sh|ps1|bat|py|env|ini|dist|sqlite|dump)$">
+    Require all denied
+</FilesMatch>
+
+# The service worker must always be revalidated -- the host's default
+# static-asset caching (7 days, no query-string busting possible for a file
+# a browser fetches by a fixed path) can otherwise leave an already-visited
+# browser running a stale push-sw.js indefinitely, silently missing any fix.
+<IfModule mod_headers.c>
+    <FilesMatch "^push-sw\.js$">
+        Header set Cache-Control "no-cache, must-revalidate"
+    </FilesMatch>
+</IfModule>
+
+<IfModule mod_rewrite.c>
+    <IfModule mod_negotiation.c>
+        Options -MultiViews -Indexes
+    </IfModule>
+
+    RewriteEngine On
+
+    # Handle Authorization Header
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Redirect Trailing Slashes If Not A Folder...
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteCond %{REQUEST_URI} (.+)/$
+    RewriteRule ^ %1 [L,R=301]
+
+    # Send Requests To Front Controller...
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^ index.php [L]
+</IfModule>

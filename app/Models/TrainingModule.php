@@ -1,0 +1,43 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\SoftDeletes;
+use OwenIt\Auditing\Auditable;
+use OwenIt\Auditing\Contracts\Auditable as AuditableContract;
+
+class TrainingModule extends Model implements AuditableContract
+{
+    use HasFactory, SoftDeletes, Auditable;
+
+    protected $fillable = [
+        'phase_id', 'title', 'description', 'content_type', 
+        'content_body', 'content_url', 'estimated_time_minutes', 
+        'order', 'is_assessment_required', 'passing_percentage',
+        'questions_per_test', 'show_all_at_once', 'tenant_id',
+        'video_chapters', 'video_milestones'
+    ];
+
+    protected $casts = [
+        'video_chapters' => 'array',
+        'video_milestones' => 'array',
+        'show_all_at_once' => 'boolean',
+    ];
+
+    public function phase()
+    {
+        return $this->belongsTo(TrainingPhase::class, 'phase_id');
+    }
+
+    public function questions()
+    {
+        return $this->hasMany(TrainingQuestion::class, 'module_id');
+    }
+
+    public function userProgress()
+    {
+        return $this->hasMany(UserTrainingProgress::class, 'module_id');
+    }
+}

@@ -1,0 +1,66 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Concerns\HasUuids;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use OwenIt\Auditing\Auditable;
+use OwenIt\Auditing\Contracts\Auditable as AuditableContract;
+
+class LibraryFile extends Model implements AuditableContract
+{
+    use HasFactory, HasUuids, Auditable;
+
+    protected $fillable = [
+        'title',
+        'brand',
+        'sub_category',
+        'product_name',
+        'category',
+        'youtube_url',
+        'file_path',
+        'mime_type',
+        'size',
+        'description',
+        'summary',
+        'key_properties',
+        'hazards',
+        'usage_instructions',
+        'tags',
+        'is_public',
+        'created_by_id',
+        'tenant_id',
+        'presenter_id',
+        'session_date',
+    ];
+
+    protected $casts = [
+        'is_public' => 'boolean',
+        'key_properties' => 'array',
+        'hazards' => 'array',
+        'usage_instructions' => 'array',
+        'tags' => 'array',
+        'session_date' => 'date',
+    ];
+
+    public function creator()
+    {
+        return $this->belongsTo(User::class, 'created_by_id');
+    }
+
+    public function presenter()
+    {
+        return $this->belongsTo(User::class, 'presenter_id');
+    }
+
+    public function permissions()
+    {
+        return $this->hasMany(LibraryFilePermission::class, 'file_id');
+    }
+
+    public function permittedUsers()
+    {
+        return $this->belongsToMany(User::class, 'library_file_permissions', 'file_id', 'user_id');
+    }
+}

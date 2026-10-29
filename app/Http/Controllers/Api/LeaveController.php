@@ -1,0 +1,215 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\ApiClasses\Error;
+use App\ApiClasses\Success;
+use App\Enums\LeaveRequestStatus;
+use App\Enums\Status;
+use App\Helpers\NotificationHelper;
+use App\Http\Controllers\Controller;
+use App\Models\LeaveRequest;
+use App\Models\LeaveType;
+use App\Notifications\Leave\CancelLeaveRequest;
+use App\Notifications\Leave\NewLeaveRequest;
+use App\Services\LeavePolicyService;
+use Constants;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+
+class LeaveController extends Controller
+{
+  public function getLeaveTypes()
+  {
+    $user = auth()->user();
+    $leaveTypes = LeaveType::where('status', Status::ACTIVE)
+      ->where(function ($q) use ($user) {
+          $q->whereNull('site_id')
+            ->orWhere('site_id', $user->site_id);
+      })->get();
+
+    $response = $leaveTypes->map(function ($leaveType) {
+      return [
+        'id' => $leaveType->id,
+        'name' => $leaveType->name,
+        'isImgRequired' => $leaveType->is_proof_required,
+      ];
+    });
+
+    return Success::response($response);
+  }
+
+  public function getLeaveRequests(Request $request)
+  {
+    $skip = $request->skip;
+    $take = $request->take ?? 10;
+
+
+    $leaveRequests = LeaveRequest::query()
+      ->where('user_id', auth()->id())
+      ->with('leaveType')
+      ->orderBy('id', 'desc');
+
+    if ($request->has('status')) {
+      $leaveRequests->where('status', LeaveRequestStatus::from($request->status));
+    }
+
+    $totalCount = $leaveRequests->count();
+
+    $leaveRequests = $leaveRequests->skip($skip)->take($take)->get();
+
+    $leaveRequests = $leaveRequests->map(function ($leaveRequest) {
+      return [
+        'id' => $leaveRequest->id,
+        'fromDate' => $leaveRequest->from_date->format(Constants::DateFormat),
+        'toDate' => $leaveRequest->to_date->format(Constants::DateFormat),
+        'leaveType' => $leaveRequest->leaveType->name,
+        'comments' => $leaveRequest->notes,
+        'status' => $leaveRequest->status,
+        'createdOn' => $leaveRequest->created_at->format(Constants::DateTimeFormat),
+        'approvedOn' => $leaveRequest->approved_at != null ? $leaveRequest->approved_at : '',
+        'approvedBy' => $leaveRequest->approved_at != null ? 'Admin' : '',
+      ];
+    });
+
+    $response = [
+      'totalCount' => $totalCount,
+      'values' => $leaveRequests
+    ];
+
+    return Success::response($response);
+  }
+
+  public function uploadLeaveDocument(Request $request)
+  {
+    $file = $request->file('file');
+
+    if ($file == null) {
+      return Error::response('File is required');
+    }
+
+    $lastLeaveRequest = LeaveRequest::where('user_id', auth()->user()->id)->orderBy('id', 'desc')->first();
+
+    if ($lastLeaveRequest == null) {
+      return Error::response('Leave request not found');
+    }
+
+    $fileName = time() . '_' . $file->getClientOriginalName();
+    Storage::disk('public')->putFileAs(Constants::BaseFolderLeaveRequestDocument, $file, $fileName);
+
+    $lastLeaveRequest->document = $fileName;
+
+    $lastLeaveRequest->save();
+
+    return Success::response('Document uploaded successfully');
+
+  }
+
+  public function cancelLeaveRequest(Request $request)
+  {
+    $req = $request->all();
+
+    $leaveRequestId = reset($req);
+
+    if ($leaveRequestId == null) {
+      Error::response('Leave request Id is required');
+    }
+
+    $leaveRequest = LeaveRequest::find($leaveRequestId);
+
+    if ($leaveRequest == null) {
+      Error::response('Leave request not found');
+    }
+
+    if ($leaveRequest->status != LeaveRequestStatus::PENDING) {
+      Error::response('Leave request cannot be cancelled');
+    }
+
+    $leaveRequest->status = LeaveRequestStatus::CANCELLED;
+    $leaveRequest->save();
+
+    NotificationHelper::notifyAdminHR(new CancelLeaveRequest($leaveRequest));
+
+    return Success::response('Leave request cancelled successfully');
+  }
+
+  public function createLeaveRequest(Request $request)
+  {
+
+    $fromDate    = $request->fromDate;
+    $toDate      = $request->toDate;
+    $leaveTypeId = $request->leaveType;
+    $remarks     = $request->comments;
+    $isHalfDay   = $request->boolean('is_half_day', false);
+    $halfDaySession = $request->input('half_day_session');
+
+    if ($leaveTypeId == null) {
+      return Error::response('Leave type is required');
+    }
+
+    $leaveType = LeaveType::find($leaveTypeId);
+
+    if ($leaveType == null) {
+      return Error::response('Leave type not found');
+    }
+
+    $finalFromDate = date('Y-m-d', strtotime($fromDate));
+    $finalToDate   = $isHalfDay ? $finalFromDate : date('Y-m-d', strtotime($toDate));
+
+    if ($finalFromDate > $finalToDate) {
+      return Error::response('From date cannot be greater than to date');
+    }
+
+    // Same one-week back-dating limit as the web form (the app had none).
+    if ($backdateError = \App\Support\LeaveBackdate::error($finalFromDate, $finalToDate, auth()->id())) {
+      return Error::response($backdateError);
+    }
+
+    $user = auth()->user();
+
+    $hours     = $request->duration_hours;
+    $startTime = $request->start_time;
+    $endTime   = $request->end_time;
+
+    // Unit leave policy enforcement
+    $policyError = LeavePolicyService::validate($user, $leaveTypeId, $finalFromDate, $finalToDate, $hours, $isHalfDay, $startTime, $endTime, $isHalfDay ? ($halfDaySession ?? 'first_half') : null);
+    if ($policyError) {
+      return Error::response($policyError);
+    }
+
+    $isShort = $leaveType && (bool)$leaveType->is_short_leave;
+
+    $leaveRequest = LeaveRequest::create([
+      'from_date'        => $finalFromDate,
+      'to_date'          => $finalToDate,
+      'leave_type_id'    => $leaveTypeId,
+      'user_notes'       => $remarks,
+      'user_id'          => $user->id,
+      'is_short_leave'   => $isShort,
+      'duration_hours'   => $hours,
+      'start_time'       => $startTime,
+      'end_time'         => $endTime,
+      'is_half_day'      => $isHalfDay,
+      'half_day_session' => $isHalfDay ? ($halfDaySession ?? 'first_half') : null,
+      'status'           => $isShort ? LeaveRequestStatus::APPROVED : LeaveRequestStatus::PENDING,
+      'approved_by_id'   => $isShort ? null : null,
+      'approved_at'      => $isShort ? now() : null,
+      'approval_notes'   => $isShort ? 'System auto-approved first monthly short leave' : null,
+    ]);
+
+    // LWP Detection at submission time
+    $impact = LeavePolicyService::getBalanceImpact($user, $leaveTypeId, $finalFromDate, $finalToDate, $isHalfDay);
+    $workingDays = LeavePolicyService::calculateWorkingDays($user, $leaveTypeId, $finalFromDate, $finalToDate, $isHalfDay);
+    $availableBalance = $impact['available'] ?? 0;
+    if ($leaveType->is_paid && $availableBalance < $workingDays) {
+        $lwpDays = max(0, $workingDays - $availableBalance);
+        $leaveRequest->is_lwp   = true;
+        $leaveRequest->lwp_days = $lwpDays;
+        $leaveRequest->saveQuietly();
+    }
+
+    NotificationHelper::notifyAdminHR(new NewLeaveRequest($leaveRequest));
+
+    return Success::response('Leave request created successfully');
+  }
+}

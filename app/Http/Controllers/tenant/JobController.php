@@ -1,0 +1,457 @@
+<?php
+
+namespace App\Http\Controllers\tenant;
+
+use App\Http\Controllers\Controller;
+use App\Models\Site;
+use App\Models\CustomQuestion;
+use App\Models\Job;
+use App\Models\JobApplication;
+use App\Models\JobApplicationNote;
+use App\Models\JobCategory;
+use App\Models\User;
+use Illuminate\Http\Request;
+use App\Models\GenerateOfferLetter;
+use App\Models\Utility;
+use App\Models\JobStage;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\App;
+use Illuminate\Support\Facades\Session;
+use Illuminate\Support\Facades\DB;
+
+class JobController extends Controller
+{
+
+    public function index($lang = 'en')
+    {
+        if (Auth::user()->can('Manage Job')) {
+            $jobs = Job::where('created_by', '=', Auth::user()->creatorId())->latest()->get();
+
+            $stats = Job::where('created_by', '=', Auth::user()->creatorId())
+                ->selectRaw("
+                    COUNT(*) as total,
+                    SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active,
+                    SUM(CASE WHEN status = 'in_active' THEN 1 ELSE 0 END) as in_active
+                ")
+                ->first();
+
+            $data['total']     = $stats->total ?? 0;
+            $data['active']    = $stats->active ?? 0;
+            $data['in_active'] = $stats->in_active ?? 0;
+            $Offerletter = GenerateOfferLetter::all();
+            $currOfferletterTempLang = GenerateOfferLetter::where('created_by',  Auth::user()->id)->where('lang', $lang)->first();
+
+            $langs = $lang;
+
+
+            return view('tenant.job.index', compact('jobs', 'data', 'currOfferletterTempLang', 'langs'));
+        } else {
+            return redirect()->back()->with('error', __('Permission denied.'));
+        }
+    }
+
+    public function create()
+    {
+        if (Auth::user()->can('Create Job')) {
+            $categories = JobCategory::where('created_by', Auth::user()->creatorId())->get()->pluck('title', 'id');
+            $categories->prepend('--', '');
+
+            $branches = Site::where('created_by_id', Auth::user()->creatorId())->get()->pluck('name', 'id');
+
+            $status = Job::$status;
+
+            $customQuestion = CustomQuestion::where('created_by', Auth::user()->creatorId())->get();
+
+            return view('tenant.job.create', compact('categories', 'status', 'branches', 'customQuestion'));
+        } else {
+            return redirect()->back()->with('error', __('Permission denied.'));
+        }
+    }
+
+    public function store(Request $request)
+    {
+        if (Auth::user()->can('Create Job')) {
+
+            $rules = [
+                'title' => 'required',
+                'branch' => 'required',
+                'category' => 'required',
+                'skill' => 'required',
+                'position' => 'required',
+                'start_date' => 'required',
+                'end_date' => 'required',
+                'description' => 'required',
+                'requirement' => 'required',
+                'custom_question.*' => 'required',
+            ];
+
+            if (isset($request->visibility) && in_array('terms', $request->visibility)) {
+                $rules['terms_and_conditions'] = 'required';
+            }
+
+            $validator = Validator::make(
+                $request->all(),
+                $rules
+            );
+
+            if ($validator->fails()) {
+                $messages = $validator->getMessageBag();
+
+                return redirect()->back()->with('error', $messages->first());
+            }
+
+            $job                       = new Job();
+            $job->title                = $request->title;
+            $job->branch               = $request->branch;
+            $job->category             = $request->category;
+            $job->skill                = $request->skill;
+            $job->position             = $request->position;
+            $job->status               = $request->status;
+            $job->start_date           = $request->start_date;
+            $job->end_date             = $request->end_date;
+            $job->description          = \App\Helpers\HtmlSanitizer::clean($request->description);
+            $job->requirement          = \App\Helpers\HtmlSanitizer::clean($request->requirement);
+            $job->terms_and_conditions = \App\Helpers\HtmlSanitizer::clean($request->terms_and_conditions);
+            $job->code                 = uniqid();
+            $job->applicant            = !empty($request->applicant) ? implode(',', $request->applicant) : '';
+            $job->visibility           = !empty($request->visibility) ? implode(',', $request->visibility) : '';
+            $job->custom_question      = !empty($request->custom_question) ? implode(',', $request->custom_question) : '';
+            $job->created_by           = Auth::user()->creatorId();
+            $job->save();
+
+            return redirect()->route('job.index')->with('success', __('Job  successfully created.'));
+        } else {
+            return redirect()->route('job.index')->with('error', __('Permission denied.'));
+        }
+    }
+
+    public function show(Job $job)
+    {
+        if (Auth::user()->can('Show Job')) {
+            $status          = Job::$status;
+            $job->applicant  = !empty($job->applicant) ? explode(',', $job->applicant) : '';
+            $job->visibility = !empty($job->visibility) ? explode(',', $job->visibility) : '';
+            $job->skill      = !empty($job->skill) ? explode(',', $job->skill) : '';
+
+            return view('tenant.job.show', compact('status', 'job'));
+        } else {
+            return redirect()->route('job.index')->with('error', __('Permission denied.'));
+        }
+    }
+
+    public function edit(Job $job)
+    {
+        if (Auth::user()->can('Edit Job')) {
+            $categories = JobCategory::where('created_by', Auth::user()->creatorId())->get()->pluck('title', 'id');
+            $categories->prepend('--', '');
+
+            $branches = Site::where('created_by_id', Auth::user()->creatorId())->get()->pluck('name', 'id');
+
+            $status = Job::$status;
+
+            $job->applicant       = explode(',', $job->applicant);
+            $job->visibility      = explode(',', $job->visibility);
+            $job->custom_question = explode(',', $job->custom_question);
+
+            $customQuestion = CustomQuestion::where('created_by', Auth::user()->creatorId())->get();
+
+            return view('tenant.job.edit', compact('categories', 'status', 'branches', 'job', 'customQuestion'));
+        } else {
+            return redirect()->back()->with('error', __('Permission denied.'));
+        }
+    }
+
+    public function update(Request $request, Job $job)
+    {
+        if (Auth::user()->can('Edit Job')) {
+
+            $rules = [
+                'title' => 'required',
+                'branch' => 'required',
+                'category' => 'required',
+                'skill' => 'required',
+                'position' => 'required',
+                'start_date' => 'required',
+                'end_date' => 'required',
+                'description' => 'required',
+                'requirement' => 'required',
+            ];
+
+            if (isset($request->visibility) && in_array('terms', $request->visibility)) {
+                $rules['terms_and_conditions'] = 'required';
+            }
+
+            $validator = Validator::make(
+                $request->all(),
+                $rules
+            );
+
+            if ($validator->fails()) {
+                $messages = $validator->getMessageBag();
+
+                return redirect()->back()->with('error', $messages->first());
+            }
+
+            $job->title           = $request->title;
+            $job->branch          = $request->branch;
+            $job->category        = $request->category;
+            $job->skill           = $request->skill;
+            $job->position        = $request->position;
+            $job->status          = $request->status;
+            $job->start_date      = $request->start_date;
+            $job->end_date        = $request->end_date;
+            $job->description     = \App\Helpers\HtmlSanitizer::clean($request->description);
+            $job->requirement     = \App\Helpers\HtmlSanitizer::clean($request->requirement);
+            $job->terms_and_conditions = \App\Helpers\HtmlSanitizer::clean($request->terms_and_conditions);
+            $job->applicant       = !empty($request->applicant) ? implode(',', $request->applicant) : '';
+            $job->visibility      = !empty($request->visibility) ? implode(',', $request->visibility) : '';
+            $job->custom_question = !empty($request->custom_question) ? implode(',', $request->custom_question) : '';
+            $job->save();
+
+            return redirect()->route('job.index')->with('success', __('Job  successfully updated.'));
+        } else {
+            return redirect()->route('job.index')->with('error', __('Permission denied.'));
+        }
+    }
+
+    public function destroy(Job $job)
+    {
+        $application = JobApplication::where('job', $job->id)->get()->pluck('id');
+        JobApplicationNote::whereIn('application_id', $application)->delete();
+        JobApplication::where('job', $job->id)->delete();
+        $job->delete();
+
+        return redirect()->route('job.index')->with('success', __('Job  successfully deleted.'));
+    }
+
+    public function career($lang = 'en')
+    {
+        $query = Job::where('status', 'active')->with(['createdBy', 'branches', 'categories']);
+
+        // Filtering Logic
+        if (request()->has('title') && !empty(request()->title)) {
+            $query->where('title', 'like', '%' . request()->title . '%');
+        }
+        if (request()->has('category') && !empty(request()->category)) {
+            $query->where('category', request()->category);
+        }
+        if (request()->has('location') && !empty(request()->location)) {
+            $query->where('branch', request()->location);
+        }
+
+        $jobs = $query->paginate(10);
+        
+        $categories = \App\Models\JobCategory::all();
+        $locations = \App\Models\Site::where('status', 1)->get();
+
+        $lang = $lang ?? 'en';
+        Session::put('lang', $lang);
+
+        App::setLocale($lang);
+
+        $companySettings['title_text']      = Utility::getValByName('title_text');
+        $companySettings['footer_text']     = Utility::getValByName('footer_text');
+        $companySettings['company_favicon'] = Utility::getValByName('company_favicon');
+        $companySettings['company_logo']    = Utility::getValByName('company_logo');
+        $companySettings['metakeyword']     = Utility::getValByName('metakeyword');
+        $companySettings['metadesc']        = Utility::getValByName('metadesc');
+        $languages                          = Utility::languages();
+
+        $currantLang = Session::get('lang');
+        if (empty($currantLang)) {
+            $currantLang = $lang;
+        }
+
+        $id = 1;
+
+        return view('tenant.job.career', compact('companySettings', 'jobs', 'categories', 'locations', 'languages', 'currantLang', 'id'));
+    }
+
+    public function jobRequirement($code, $lang)
+    {
+        try {
+            $job = Job::where('code', $code)->first();
+            if ($job->status == 'in_active') {
+                return redirect()->back()->with('error', __('Permission Denied.'));
+            }
+        } catch (\Throwable $th) {
+            return redirect()->back()->with('error', __('Page Not Found.'));
+        }
+
+        Session::put('lang', $lang);
+
+        App::setLocale($lang);
+
+        $companySettings['title_text']      = Utility::getValByName('title_text');
+        $companySettings['footer_text']     = Utility::getValByName('footer_text');
+        $companySettings['company_favicon'] = Utility::getValByName('company_favicon');
+        $companySettings['company_logo']    = Utility::getValByName('company_logo');
+        $companySettings['metakeyword']     = Utility::getValByName('metakeyword');
+        $companySettings['metadesc']        = Utility::getValByName('metadesc');
+        $languages                          = Utility::languages();
+
+        $currantLang = Session::get('lang');
+        if (empty($currantLang)) {
+            $currantLang = !empty($job->createdBy) ? $job->createdBy->lang : 'en';
+        }
+
+
+        return view('tenant.job.requirement', compact('companySettings', 'job', 'languages', 'currantLang'));
+    }
+
+    public function jobApply($code, $lang)
+    {
+        Session::put('lang', $lang);
+
+        App::setLocale($lang);
+        try {
+            $job = Job::where('code', $code)->first();
+            $companySettings['title_text']      = Utility::getValByName('title_text');
+            $companySettings['footer_text']     = Utility::getValByName('footer_text');
+            $companySettings['company_favicon'] = Utility::getValByName('company_favicon');
+            $companySettings['company_logo']    = Utility::getValByName('company_logo');
+        } catch (\Throwable $th) {
+            return redirect()->back()->with('error', 'Page not Found');
+        }
+
+
+        $que = !empty($job->custom_question) ? explode(",", $job->custom_question) : [];
+
+        $questions = CustomQuestion::wherein('id', $que)->get();
+
+        $languages = Utility::languages();
+
+        $currantLang = Session::get('lang');
+        if (empty($currantLang)) {
+            $currantLang = !empty($job->createdBy) ? $job->createdBy->lang : 'en';
+        }
+
+        return view('tenant.job.apply', compact('companySettings', 'job', 'questions', 'languages', 'currantLang'));
+    }
+
+    public function TermsAndCondition($id)
+    {
+        try {
+            $job = Job::where('id', $id)->where('status', 'active')->firstOrFail();
+        } catch (\Throwable $th) {
+            return redirect()->back()->with('error', 'Page not Found');
+        }
+
+        return view('tenant.job.terms', compact('job'));
+    }
+
+    public function jobApplyData(Request $request, $code)
+    {
+        $rules = [
+            'name' => 'required',
+            'email' => 'required',
+            'phone' => 'required',
+            // SECURITY (C-1): recruitment uploads were stored to the public disk
+            // with the client-supplied extension and NO type check, allowing an
+            // unauthenticated attacker to upload an executable/script file. Enforce
+            // a strict server-side allow-list (mimes is content-guessed, so a
+            // renamed .php/.svg/.html is rejected).
+            'resume' => 'nullable|file|mimes:pdf,doc,docx|max:5120',
+            'profile' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:2048',
+        ];
+        if (isset($request->terms_condition_check) && empty($request->terms_condition_check)) {
+            $rules['terms_condition_check'] = [
+                'required',
+            ];
+        }
+
+        $validator = Validator::make(
+            $request->all(),
+            $rules
+        );
+
+        if ($validator->fails()) {
+            $messages = $validator->getMessageBag();
+
+            return redirect()->back()->with('error', $messages->first());
+        }
+
+        $job = Job::where('code', $code)->first();
+
+        // $stage = JobStage::where('created_by',Auth::user()->creatorId())->first();
+        $stage = JobStage::where('created_by', $job->created_by)->first();
+
+        $jobApplication                        = new JobApplication();
+        $jobApplication->job                   = $job->id;
+        $jobApplication->name                  = $request->name;
+        $jobApplication->email                 = $request->email;
+        $jobApplication->phone                 = $request->phone;
+        $jobApplication->cover_letter          = $request->cover_letter;
+        $jobApplication->dob                   = $request->dob;
+        $jobApplication->gender                = $request->gender;
+        $jobApplication->address               = $request->address;
+        $jobApplication->country               = $request->country;
+        $jobApplication->state                 = $request->state;
+        $jobApplication->stage                 = $stage->id;
+        $jobApplication->city                  = $request->city;
+        $jobApplication->zip_code              = $request->zip_code;
+        $jobApplication->custom_question       = json_encode($request->question);
+        $jobApplication->terms_condition_check = !empty($request->terms_condition_check) ? $request->terms_condition_check : '';
+        $jobApplication->created_by            = $job->created_by;
+
+        if (!empty($request->profile)) {
+            $image_size = $request->file('profile')->getSize();
+            $result = Utility::updateStorageLimit($job->created_by, $image_size);
+            if ($result == 1) {
+                $filename        = \Illuminate\Support\Str::random(20);
+                // SECURITY (C-1): never store the client-supplied extension verbatim
+                // (a PDF/PHP polyglot named x.php would otherwise land as an executable
+                // file on the public disk). Restrict to the validated image set.
+                $extension       = strtolower($request->file('profile')->getClientOriginalExtension());
+                if (!in_array($extension, ['jpg', 'jpeg', 'png', 'webp'], true)) {
+                    return redirect()->back()->with('error', __('Invalid profile image type.'));
+                }
+                $fileNameToStore = $filename . '_' . time() . '.' . $extension;
+
+                $dir        = 'job/profile';
+
+                $url = '';
+                $path = Utility::upload_file($request, 'profile', $fileNameToStore, $dir, []);
+                $jobApplication->profile         = !empty($request->profile) ? $fileNameToStore : '';
+                if ($path['flag'] == 1) {
+                    $url = $path['url'];
+                } else {
+                    return redirect()->back()->with('error', __($path['msg']));
+                }
+            }
+        }
+
+        if (!empty($request->resume)) {
+
+            $image_size = $request->file('resume')->getSize();
+            $result = Utility::updateStorageLimit($job->created_by, $image_size);
+
+            if ($result == 1) {
+                $filename1        = \Illuminate\Support\Str::random(20);
+                // SECURITY (C-1): restrict the stored extension to the validated
+                // document set; do not trust the client-supplied name/extension.
+                $extension1       = strtolower($request->file('resume')->getClientOriginalExtension());
+                if (!in_array($extension1, ['pdf', 'doc', 'docx'], true)) {
+                    return redirect()->back()->with('error', __('Invalid resume file type.'));
+                }
+                $fileNameToStore1 = $filename1 . '_' . time() . '.' . $extension1;
+
+                $dir        = 'job/resume';
+
+                $url = '';
+                $path = Utility::upload_file($request, 'resume', $fileNameToStore1, $dir, []);
+                $jobApplication->resume          = !empty($request->resume) ? $fileNameToStore1 : '';
+
+                if ($path['flag'] == 1) {
+                    $url = $path['url'];
+                } else {
+                    return redirect()->back()->with('error', __($path['msg']));
+                }
+            }
+        }
+        $jobApplication->save();
+
+        return redirect()->back()->with('success', __('Job application successfully send.') . ((isset($result) && $result != 1) ? '<br> <span class="text-danger">' . $result . '</span>' : ''));
+    }
+}
